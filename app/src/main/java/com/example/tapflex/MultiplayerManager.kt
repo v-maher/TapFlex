@@ -10,11 +10,25 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import java.util.UUID
 import kotlin.random.Random
 
+data class PlayerData(
+    val r1: Int = 0,
+    val r2: Int = 0,
+    val r3: Int = 0,
+    val ready: Boolean = false,
+    val id: String = "",
+    val name: String = ""
+) {
+    fun getScore(round: Int): Int = when(round) {
+        1 -> r1; 2 -> r2; 3 -> r3; else -> 0
+    }
+    fun getTotal(): Int = r1 + r2 + r3
+}
+
 data class MatchData(
-    val p1R1: Int = 0, val p1R2: Int = 0, val p1R3: Int = 0,
-    val p2R1: Int = 0, val p2R2: Int = 0, val p2R3: Int = 0,
+    val players: Map<String, PlayerData> = emptyMap(),
     val activeRow: Int = -1,
     val activeCol: Int = -1,
     val activeRow2: Int = -1,
@@ -22,37 +36,36 @@ data class MatchData(
     val currentShift: Int = 0,
     val currentRound: Int = 1,
     val gameState: String = "WAITING", // WAITING, PLAYING, INTERSTITIAL, FINISHED
-    val player1Ready: Boolean = false,
-    val player2Ready: Boolean = false
-) {
-    fun getP1Score(round: Int): Int = when(round) {
-        1 -> p1R1; 2 -> p1R2; 3 -> p1R3; else -> 0
-    }
-    fun getP2Score(round: Int): Int = when(round) {
-        1 -> p2R1; 2 -> p2R2; 3 -> p2R3; else -> 0
-    }
-    fun getP1Total(): Int = p1R1 + p1R2 + p1R3
-    fun getP2Total(): Int = p2R1 + p2R2 + p2R3
-}
+    val hostId: String = ""
+)
 
 class MultiplayerManager {
     private val database by lazy { FirebaseDatabase.getInstance().reference }
     private val matchId = MutableStateFlow<String?>(null)
-    private var isPlayer1: Boolean = false
+    val myPlayerId: String = UUID.randomUUID().toString().take(8)
+    private var isHost: Boolean = false
 
-    fun createMatch(onCodeGenerated: (String) -> Unit) {
+    fun createMatch(playerName: String, onCodeGenerated: (String) -> Unit) {
         val code = Random.nextInt(1000, 9999).toString()
         matchId.value = code
-        isPlayer1 = true
-        database.child("matches").child(code).setValue(MatchData())
+        isHost = true
+        val initialPlayerData = PlayerData(id = myPlayerId, name = playerName)
+        val initialMatch = MatchData(
+            players = mapOf(myPlayerId to initialPlayerData),
+            hostId = myPlayerId
+        )
+        database.child("matches").child(code).setValue(initialMatch)
         onCodeGenerated(code)
     }
 
-    fun joinMatch(code: String, onJoined: (Boolean) -> Unit) {
+    fun joinMatch(code: String, playerName: String, onJoined: (Boolean) -> Unit) {
         database.child("matches").child(code).get().addOnSuccessListener { snapshot ->
             if (snapshot.exists()) {
                 matchId.value = code
-                isPlayer1 = false
+                isHost = false
+                // Add self to players
+                database.child("matches").child(code).child("players").child(myPlayerId)
+                    .setValue(PlayerData(id = myPlayerId, name = playerName))
                 onJoined(true)
             } else {
                 onJoined(false)
@@ -79,19 +92,17 @@ class MultiplayerManager {
 
     fun updateScore(round: Int, newScore: Int) {
         val id = matchId.value ?: return
-        val playerPrefix = if (isPlayer1) "p1" else "p2"
-        val field = "${playerPrefix}R$round"
-        database.child("matches").child(id).child(field).setValue(newScore)
+        val field = "r$round"
+        database.child("matches").child(id).child("players").child(myPlayerId).child(field).setValue(newScore)
     }
 
     fun setReady(ready: Boolean) {
         val id = matchId.value ?: return
-        val field = if (isPlayer1) "player1Ready" else "player2Ready"
-        database.child("matches").child(id).child(field).setValue(ready)
+        database.child("matches").child(id).child("players").child(myPlayerId).child("ready").setValue(ready)
     }
 
     fun startRound(gridSize: Int, round: Int = 1) {
-        if (!isPlayer1) return
+        if (!isHost) return
         val id = matchId.value ?: return
         val firstRow = Random.nextInt(gridSize)
         val firstCol = Random.nextInt(gridSize)
@@ -105,23 +116,33 @@ class MultiplayerManager {
             "currentShift" to 0,
             "currentRound" to round
         )
+        
         if (round == 1) {
-            updates["p1R1"] = 0; updates["p1R2"] = 0; updates["p1R3"] = 0
-            updates["p2R1"] = 0; updates["p2R2"] = 0; updates["p2R3"] = 0
-            updates["player1Ready"] = false
-            updates["player2Ready"] = false
+            // Reset all players' scores and ready status for new game
+            database.child("matches").child(id).child("players").get().addOnSuccessListener { snapshot ->
+                val playersUpdate = mutableMapOf<String, Any>()
+                snapshot.children.forEach { playerSnapshot ->
+                    val pId = playerSnapshot.key ?: return@forEach
+                    playersUpdate["$pId/r1"] = 0
+                    playersUpdate["$pId/r2"] = 0
+                    playersUpdate["$pId/r3"] = 0
+                    playersUpdate["$pId/ready"] = false
+                }
+                database.child("matches").child(id).child("players").updateChildren(playersUpdate)
+            }
         }
+        
         database.child("matches").child(id).updateChildren(updates)
     }
 
     fun showRoundResults() {
-        if (!isPlayer1) return
+        if (!isHost) return
         val id = matchId.value ?: return
         database.child("matches").child(id).child("gameState").setValue("INTERSTITIAL")
     }
 
     fun updateTarget(row: Int, col: Int, row2: Int, col2: Int, shift: Int) {
-        if (!isPlayer1) return
+        if (!isHost) return
         val id = matchId.value ?: return
         val updates = mapOf(
             "activeRow" to row,
@@ -134,15 +155,30 @@ class MultiplayerManager {
     }
 
     fun finishGame() {
-        if (!isPlayer1) return
+        if (!isHost) return
         matchId.value?.let {
             database.child("matches").child(it).child("gameState").setValue("FINISHED")
         }
     }
     
     fun resetForRematch() {
-        if (!isPlayer1) return
+        if (!isHost) return
         val id = matchId.value ?: return
-        database.child("matches").child(id).setValue(MatchData())
+        // Keep players but reset state
+        database.child("matches").child(id).child("gameState").setValue("WAITING")
+        database.child("matches").child(id).child("currentRound").setValue(1)
+        database.child("matches").child(id).child("currentShift").setValue(0)
+        
+        database.child("matches").child(id).child("players").get().addOnSuccessListener { snapshot ->
+            val playersUpdate = mutableMapOf<String, Any>()
+            snapshot.children.forEach { playerSnapshot ->
+                val pId = playerSnapshot.key ?: return@forEach
+                playersUpdate["$pId/r1"] = 0
+                playersUpdate["$pId/r2"] = 0
+                playersUpdate["$pId/r3"] = 0
+                playersUpdate["$pId/ready"] = false
+            }
+            database.child("matches").child(id).child("players").updateChildren(playersUpdate)
+        }
     }
 }
