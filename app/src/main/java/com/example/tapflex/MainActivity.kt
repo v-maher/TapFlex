@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
 }
 
 enum class ScreenState {
-    MENU, LOBBY, PLAYING, RESULTS
+    MENU, LOBBY, PLAYING, INTERSTITIAL, RESULTS
 }
 
 @OptIn(ExperimentalAnimationApi::class)
@@ -68,51 +68,157 @@ fun ReflexGameScreen(manager: MultiplayerManager) {
     var screenState by remember { mutableStateOf(ScreenState.MENU) }
     var roomCode by remember { mutableStateOf("") }
     var isHost by remember { mutableStateOf(false) }
+    var isVsComputer by remember { mutableStateOf(false) }
     var gridSize by remember { mutableIntStateOf(4) }
+
+    // --- Game Configuration ---
+    val totalShifts = 50
+    val totalRounds = 3
+    val baseInitialDelay = 800L
+    val shiftSpeedIncrease = 10L
+    val doubleDotChance = 0.15f // 15% chance for double dots
     
     val matchDataFlow = remember(manager) { manager.observeMatch() }
     val matchData by matchDataFlow.collectAsState(initial = null)
     
-    // --- Game Logic ---
-    val totalShifts = 50
-    val baseInitialDelay = 800L
-    val shiftSpeedIncrease = 10L
+    // --- Local State for Vs Computer ---
+    var localMyRoundScores by remember { mutableStateOf(mutableListOf(0, 0, 0)) }
+    var localCpuRoundScores by remember { mutableStateOf(mutableListOf(0, 0, 0)) }
+    var localActiveRow by remember { mutableIntStateOf(-1) }
+    var localActiveCol by remember { mutableIntStateOf(-1) }
+    var localActiveRow2 by remember { mutableIntStateOf(-1) }
+    var localActiveCol2 by remember { mutableIntStateOf(-1) }
+    var localCurrentShift by remember { mutableIntStateOf(0) }
+    var localCurrentRound by remember { mutableIntStateOf(1) }
 
-    // Sync screen state with match data
-    LaunchedEffect(matchData?.gameState) {
-        when (matchData?.gameState) {
-            "WAITING" -> screenState = ScreenState.LOBBY
-            "PLAYING" -> screenState = ScreenState.PLAYING
-            "FINISHED" -> screenState = ScreenState.RESULTS
+    // Sync screen state with match data (only if not in local mode)
+    LaunchedEffect(matchData?.gameState, isVsComputer) {
+        if (!isVsComputer) {
+            when (matchData?.gameState) {
+                "WAITING" -> screenState = ScreenState.LOBBY
+                "PLAYING" -> screenState = ScreenState.PLAYING
+                "INTERSTITIAL" -> screenState = ScreenState.INTERSTITIAL
+                "FINISHED" -> screenState = ScreenState.RESULTS
+            }
         }
     }
 
-    // Host Game Loop
-    LaunchedEffect(matchData?.gameState, matchData?.currentShift) {
-        if (isHost && matchData?.gameState == "PLAYING") {
-            val currentShift = matchData?.currentShift ?: 0
-            if (currentShift < totalShifts) {
-                val delayTime = (baseInitialDelay - (currentShift * shiftSpeedIncrease)).coerceAtLeast(200L)
+    // Host Game Loop (Driving the shifts)
+    LaunchedEffect(matchData?.gameState, matchData?.currentShift, isVsComputer) {
+        if (!isVsComputer && isHost && matchData?.gameState == "PLAYING") {
+            val currentShiftCount = matchData?.currentShift ?: 0
+            val currentRound = matchData?.currentRound ?: 1
+            
+            if (currentShiftCount < totalShifts) {
+                val roundOffset = (currentRound - 1) * 50L
+                val delayTime = (baseInitialDelay - roundOffset - (currentShiftCount * shiftSpeedIncrease)).coerceAtLeast(200L)
                 delay(delayTime)
-                manager.updateTarget(
-                    row = Random.nextInt(gridSize),
-                    col = Random.nextInt(gridSize),
-                    shift = currentShift + 1
-                )
+                
+                val r1 = Random.nextInt(gridSize)
+                val c1 = Random.nextInt(gridSize)
+                var r2 = -1
+                var c2 = -1
+                
+                if (Random.nextFloat() < doubleDotChance) {
+                    r2 = Random.nextInt(gridSize)
+                    c2 = Random.nextInt(gridSize)
+                    if (r1 == r2 && c1 == c2) { r2 = -1; c2 = -1 }
+                }
+
+                manager.updateTarget(r1, c1, r2, c2, currentShiftCount + 1)
+            } else {
+                manager.showRoundResults()
+            }
+        }
+    }
+
+    // Host Round Transition Loop
+    LaunchedEffect(matchData?.gameState, isHost, isVsComputer) {
+        if (!isVsComputer && isHost && matchData?.gameState == "INTERSTITIAL") {
+            val currentRound = matchData?.currentRound ?: 1
+            delay(3000)
+            if (currentRound < totalRounds) {
+                manager.startRound(gridSize, currentRound + 1)
             } else {
                 manager.finishGame()
             }
         }
     }
 
+    // Local Game Loop (Vs Computer)
+    LaunchedEffect(screenState, localCurrentShift, isVsComputer) {
+        if (isVsComputer && screenState == ScreenState.PLAYING) {
+            if (localCurrentShift < totalShifts) {
+                val roundOffset = (localCurrentRound - 1) * 50L
+                val delayTime = (baseInitialDelay - roundOffset - (localCurrentShift * shiftSpeedIncrease)).coerceAtLeast(200L)
+                
+                localActiveRow = Random.nextInt(gridSize)
+                localActiveCol = Random.nextInt(gridSize)
+                if (Random.nextFloat() < doubleDotChance) {
+                    localActiveRow2 = Random.nextInt(gridSize)
+                    localActiveCol2 = Random.nextInt(gridSize)
+                    if (localActiveRow == localActiveRow2 && localActiveCol == localActiveCol2) {
+                        localActiveRow2 = -1; localActiveCol2 = -1
+                    }
+                } else {
+                    localActiveRow2 = -1; localActiveCol2 = -1
+                }
+                
+                delay(delayTime)
+                localCurrentShift++
+                
+                // CPU logic
+                if (Random.nextFloat() > 0.4f) {
+                    val currentScores = localCpuRoundScores.toMutableList()
+                    currentScores[localCurrentRound - 1]++
+                    localCpuRoundScores = currentScores
+                }
+                if (localActiveRow2 != -1 && Random.nextFloat() > 0.7f) {
+                    val currentScores = localCpuRoundScores.toMutableList()
+                    currentScores[localCurrentRound - 1]++
+                    localCpuRoundScores = currentScores
+                }
+            } else {
+                if (localCurrentRound < totalRounds) {
+                    screenState = ScreenState.INTERSTITIAL
+                } else {
+                    screenState = ScreenState.RESULTS
+                }
+            }
+        }
+    }
+
+    // Local Round Transition Loop
+    LaunchedEffect(screenState, isVsComputer) {
+        if (isVsComputer && screenState == ScreenState.INTERSTITIAL) {
+            delay(3000)
+            localCurrentShift = 0
+            localCurrentRound++
+            screenState = ScreenState.PLAYING
+        }
+    }
+
     // --- UI Logic ---
-    val myScore = if (isHost) matchData?.player1Score ?: 0 else matchData?.player2Score ?: 0
-    val opponentScore = if (isHost) matchData?.player2Score ?: 0 else matchData?.player1Score ?: 0
+    val currentRound = if (isVsComputer) localCurrentRound else (matchData?.currentRound ?: 1)
+    
+    val myScore = if (isVsComputer) localMyRoundScores[currentRound - 1] else (if (isHost) matchData?.getP1Score(currentRound) ?: 0 else matchData?.getP2Score(currentRound) ?: 0)
+    val opponentScore = if (isVsComputer) localCpuRoundScores[currentRound - 1] else (if (isHost) matchData?.getP2Score(currentRound) ?: 0 else matchData?.getP1Score(currentRound) ?: 0)
+    
+    val myTotalScore = if (isVsComputer) localMyRoundScores.sum() else (if (isHost) matchData?.getP1Total() ?: 0 else matchData?.getP2Total() ?: 0)
+    val opponentTotalScore = if (isVsComputer) localCpuRoundScores.sum() else (if (isHost) matchData?.getP2Total() ?: 0 else matchData?.getP1Total() ?: 0)
+
+    val currentShift = if (isVsComputer) localCurrentShift else (matchData?.currentShift ?: 0)
+    
+    val activeTargets = if (isVsComputer) {
+        listOf(localActiveRow to localActiveCol, localActiveRow2 to localActiveCol2)
+    } else {
+        listOf((matchData?.activeRow ?: -1) to (matchData?.activeCol ?: -1), (matchData?.activeRow2 ?: -1) to (matchData?.activeCol2 ?: -1))
+    }
 
     val targetBgColor = when {
-        screenState != ScreenState.PLAYING -> MaterialTheme.colorScheme.surface
-        myScore > opponentScore -> Color(0xFFE8F5E9)
-        myScore < opponentScore -> Color(0xFFFFEBEE)
+        screenState != ScreenState.PLAYING && screenState != ScreenState.INTERSTITIAL -> MaterialTheme.colorScheme.surface
+        myScore > opponentScore -> Color(0xFFC8E6C9)
+        myScore < opponentScore -> Color(0xFFFFCDD2)
         else -> MaterialTheme.colorScheme.surface
     }
     val animatedBgColor by animateColorAsState(targetValue = targetBgColor, animationSpec = tween(500), label = "")
@@ -122,13 +228,23 @@ fun ReflexGameScreen(manager: MultiplayerManager) {
             ScreenState.MENU -> MenuScreen(
                 onHost = { 
                     isHost = true
+                    isVsComputer = false
                     manager.createMatch { code -> roomCode = code }
                 },
                 onJoin = { code -> 
                     isHost = false
+                    isVsComputer = false
                     manager.joinMatch(code) { success ->
                         if (success) roomCode = code else { /* handle error */ }
                     }
+                },
+                onVsComputer = {
+                    isVsComputer = true
+                    localMyRoundScores = mutableListOf(0, 0, 0)
+                    localCpuRoundScores = mutableListOf(0, 0, 0)
+                    localCurrentShift = 0
+                    localCurrentRound = 1
+                    screenState = ScreenState.PLAYING
                 }
             )
             ScreenState.LOBBY -> LobbyScreen(
@@ -144,28 +260,53 @@ fun ReflexGameScreen(manager: MultiplayerManager) {
             ScreenState.PLAYING -> GameBoard(
                 myScore = myScore,
                 opponentScore = opponentScore,
-                currentShift = matchData?.currentShift ?: 0,
+                currentShift = currentShift,
                 totalShifts = totalShifts,
-                activeRow = matchData?.activeRow ?: -1,
-                activeCol = matchData?.activeCol ?: -1,
+                currentRound = currentRound,
+                activeTargets = activeTargets,
                 gridSize = gridSize,
                 screenWidth = screenWidth,
                 onHit = {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    manager.updateScore(myScore + 1)
+                    if (isVsComputer) {
+                        val currentScores = localMyRoundScores.toMutableList()
+                        currentScores[localCurrentRound - 1]++
+                        localMyRoundScores = currentScores
+                    } else {
+                        manager.updateScore(currentRound, myScore + 1)
+                    }
                 }
             )
-            ScreenState.RESULTS -> ResultsScreen(
+            ScreenState.INTERSTITIAL -> RoundInterstitial(
+                round = currentRound,
                 myScore = myScore,
-                opponentScore = opponentScore,
-                onBack = { screenState = ScreenState.MENU }
+                opponentScore = opponentScore
+            )
+            ScreenState.RESULTS -> ResultsScreen(
+                myScore = myTotalScore,
+                opponentScore = opponentTotalScore,
+                onBack = { 
+                    if (!isVsComputer) manager.resetForRematch()
+                    screenState = ScreenState.MENU 
+                },
+                onRematch = {
+                    if (isVsComputer) {
+                        localMyRoundScores = mutableListOf(0, 0, 0)
+                        localCpuRoundScores = mutableListOf(0, 0, 0)
+                        localCurrentShift = 0
+                        localCurrentRound = 1
+                        screenState = ScreenState.PLAYING
+                    } else {
+                        manager.startRound(gridSize, 1)
+                    }
+                }
             )
         }
     }
 }
 
 @Composable
-fun MenuScreen(onHost: () -> Unit, onJoin: (String) -> Unit) {
+fun MenuScreen(onHost: () -> Unit, onJoin: (String) -> Unit, onVsComputer: () -> Unit) {
     var codeInput by remember { mutableStateOf("") }
     Column(
         modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -178,7 +319,15 @@ fun MenuScreen(onHost: () -> Unit, onJoin: (String) -> Unit) {
             Text("HOST BATTLE")
         }
         Spacer(modifier = Modifier.height(16.dp))
-        Text("OR", color = Color.Gray)
+        Button(
+            onClick = onVsComputer, 
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+        ) {
+            Text("VS COMPUTER")
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("OR JOIN", color = Color.Gray)
         Spacer(modifier = Modifier.height(16.dp))
         OutlinedTextField(
             value = codeInput,
@@ -284,8 +433,8 @@ fun GameBoard(
     opponentScore: Int,
     currentShift: Int,
     totalShifts: Int,
-    activeRow: Int,
-    activeCol: Int,
+    currentRound: Int,
+    activeTargets: List<Pair<Int, Int>>,
     gridSize: Int,
     screenWidth: androidx.compose.ui.unit.Dp,
     onHit: () -> Unit
@@ -295,9 +444,12 @@ fun GameBoard(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            ScoreCounter(label = "YOU", score = myScore, color = MaterialTheme.colorScheme.primary)
-            ScoreCounter(label = "THEM", score = opponentScore, color = Color.Gray)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("ROUND $currentRound", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                ScoreCounter(label = "YOU", score = myScore, color = MaterialTheme.colorScheme.primary)
+                ScoreCounter(label = "THEM", score = opponentScore, color = Color.Gray)
+            }
         }
 
         val cellSize = (screenWidth - 64.dp) / gridSize
@@ -305,7 +457,7 @@ fun GameBoard(
             for (row in 0 until gridSize) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (col in 0 until gridSize) {
-                        val isTarget = (row == activeRow && col == activeCol)
+                        val isTarget = activeTargets.any { it.first == row && it.second == col }
                         Box(
                             modifier = Modifier
                                 .size(cellSize)
@@ -325,18 +477,47 @@ fun GameBoard(
 }
 
 @Composable
-fun ResultsScreen(myScore: Int, opponentScore: Int, onBack: () -> Unit) {
+fun RoundInterstitial(round: Int, myScore: Int, opponentScore: Int) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("ROUND $round OVER", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(24.dp))
+        Text("Current Round Score:", fontSize = 18.sp, color = Color.Gray)
+        Spacer(modifier = Modifier.height(16.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            ScoreCounter("YOU", myScore, MaterialTheme.colorScheme.primary)
+            ScoreCounter("THEM", opponentScore, Color.Gray)
+        }
+        Spacer(modifier = Modifier.height(48.dp))
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Get ready for Round ${round + 1}...", color = Color.Gray)
+    }
+}
+
+@Composable
+fun ResultsScreen(myScore: Int, opponentScore: Int, onBack: () -> Unit, onRematch: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         val win = myScore > opponentScore
-        Text(if (win) "VICTORY" else "DEFEAT", fontSize = 48.sp, fontWeight = FontWeight.Black, color = if (win) Color.Green else Color.Red)
+        Text("BATTLE FINISHED", fontSize = 24.sp, color = Color.Gray)
+        Text(if (win) "VICTORY" else if (myScore < opponentScore) "DEFEAT" else "DRAW", 
+            fontSize = 48.sp, fontWeight = FontWeight.Black, color = if (win) Color.Green else if (myScore < opponentScore) Color.Red else Color.Gray)
         Spacer(modifier = Modifier.height(16.dp))
-        Text("$myScore - $opponentScore", fontSize = 32.sp)
+        Text("TOTAL TALLY", fontSize = 18.sp, color = Color.Gray)
+        Text("$myScore - $opponentScore", fontSize = 42.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(48.dp))
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+        Button(onClick = onRematch, modifier = Modifier.fillMaxWidth().height(56.dp)) {
+            Text("REMATCH")
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth().height(56.dp)) {
             Text("BACK TO MENU")
         }
     }
