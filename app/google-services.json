@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "562106928876",
+    "project_id": "tapflex-d1515",
+    "storage_bucket": "tapflex-d1515.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:562106928876:android:ba6d73108cbabfea25dfc9",
+        "android_client_info": {
+          "package_name": "com.example.tapflex"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBn5l3uk3bJ1SIMYPoJs4DOgPXSdh2XWeA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
